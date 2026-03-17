@@ -12,8 +12,12 @@ import { fetchTokenBalances, TokenBalance } from '../services/tokenService';
 import {
   isBiometricEnabled, setBiometricEnabled,
   authenticateWithBiometrics, isBiometricAvailable,
-  savePIN, verifyPIN,
+  savePIN, verifyPIN, hasPIN,
 } from '../services/biometricService';
+import {
+  loadCustomTokens, addCustomToken, removeCustomToken, CustomToken,
+} from '../services/customTokenService';
+import { TokenMetadata } from '../services/pinataService';
 import { NETWORKS, NetworkId } from '../constants/config';
 
 export interface BalanceInfo {
@@ -31,11 +35,13 @@ interface WalletContextType {
   selectedNetwork: NetworkId;
   balances: Partial<Record<NetworkId, BalanceInfo>>;
   tokenBalances: TokenBalance[];
+  customTokens: CustomToken[];
   totalUSD: string;
   isLoadingBalances: boolean;
   isLoadingTokens: boolean;
   biometricEnabled: boolean;
   biometricAvailable: boolean;
+  pinEnabled: boolean;
   createWallet: () => Promise<string>;
   importWallet: (mnemonic: string) => Promise<boolean>;
   confirmWalletCreation: (mnemonic: string) => Promise<void>;
@@ -50,6 +56,9 @@ interface WalletContextType {
   lockWallet: () => void;
   enableBiometric: (pin: string) => Promise<void>;
   disableBiometric: () => Promise<void>;
+  importCustomToken: (metadata: TokenMetadata) => Promise<CustomToken>;
+  deleteCustomToken: (tokenId: string) => Promise<void>;
+  refreshCustomTokens: () => Promise<void>;
 }
 
 export const WalletContext = createContext<WalletContextType | undefined>(undefined);
@@ -63,10 +72,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [selectedNetwork, setSelectedNetworkState] = useState<NetworkId>('ethereum');
   const [balances, setBalances] = useState<Partial<Record<NetworkId, BalanceInfo>>>({});
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
+  const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
   const [isLoadingBalances, setIsLoadingBalances] = useState(false);
   const [isLoadingTokens, setIsLoadingTokens] = useState(false);
   const [biometricEnabled, setBiometricEnabledState] = useState(false);
   const [biometricAvailable, setBiometricAvailableState] = useState(false);
+  const [pinEnabled, setPinEnabled] = useState(false);
 
   // Refs to avoid stale closures
   const addressesRef = useRef<WalletAddresses | null>(null);
@@ -78,7 +89,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   selectedNetworkRef.current = selectedNetwork;
   mnemonicRef.current = mnemonic;
 
-  // ─── Define all callbacks FIRST before any useEffect that references them ──
+  // ─── Callbacks ───────────────────────────────────────────────────────────
 
   const refreshBalances = useCallback(async (): Promise<void> => {
     const addr = addressesRef.current;
@@ -92,7 +103,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoadingBalances(false);
     }
-  }, []); // stable — uses ref
+  }, []);
 
   const refreshTokenBalances = useCallback(async (): Promise<void> => {
     const addr = addressesRef.current;
@@ -116,7 +127,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoadingTokens(false);
     }
-  }, []); // stable — uses ref
+  }, []);
+
+  const refreshCustomTokens = useCallback(async (): Promise<void> => {
+    try {
+      const tokens = await loadCustomTokens();
+      setCustomTokens(tokens);
+    } catch {
+      setCustomTokens([]);
+    }
+  }, []);
 
   const createWallet = useCallback(async (): Promise<string> => {
     const m = await generateMnemonicAsync();
@@ -157,8 +177,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setHasWallet(false);
     setBalances({});
     setTokenBalances([]);
+    setCustomTokens([]);
     setIsLocked(false);
     setBiometricEnabledState(false);
+    setPinEnabled(false);
   }, []);
 
   const setSelectedNetwork = useCallback((network: NetworkId) => {
@@ -224,18 +246,40 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const setupPIN = useCallback(async (pin: string): Promise<void> => {
     await savePIN(pin);
-    // Don't enable biometric — just save the PIN for the lock screen
+    setPinEnabled(true);
   }, []);
 
   const enableBiometric = useCallback(async (pin: string): Promise<void> => {
     await savePIN(pin);
     await setBiometricEnabled(true);
     setBiometricEnabledState(true);
+    setPinEnabled(true);
   }, []);
 
   const disableBiometric = useCallback(async (): Promise<void> => {
     await setBiometricEnabled(false);
     setBiometricEnabledState(false);
+  }, []);
+
+  const importCustomToken = useCallback(async (metadata: TokenMetadata): Promise<CustomToken> => {
+    const addr = addressesRef.current;
+    const walletAddresses: Record<NetworkId, string> = {
+      ethereum: addr?.ethereum ?? '',
+      bsc: addr?.bsc ?? '',
+      polygon: addr?.polygon ?? '',
+      solana: addr?.solana ?? '',
+    };
+    const token = await addCustomToken(metadata, walletAddresses);
+    setCustomTokens(prev => {
+      const filtered = prev.filter(t => t.id !== token.id);
+      return [token, ...filtered];
+    });
+    return token;
+  }, []);
+
+  const deleteCustomToken = useCallback(async (tokenId: string): Promise<void> => {
+    await removeCustomToken(tokenId);
+    setCustomTokens(prev => prev.filter(t => t.id !== tokenId));
   }, []);
 
   // ─── Load wallet on mount ─────────────────────────────────────────────────
@@ -244,17 +288,20 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     let mounted = true;
     (async () => {
       try {
-        // Check biometrics first (safe — wrapped in try/catch inside service)
-        const [bioAvail, bioEnabled, stored] = await Promise.all([
+        const [bioAvail, bioEnabled, pinExists, stored, customToks] = await Promise.all([
           isBiometricAvailable().catch(() => false),
           isBiometricEnabled().catch(() => false),
+          hasPIN().catch(() => false),
           loadWallet().catch(() => null),
+          loadCustomTokens().catch(() => []),
         ]);
 
         if (!mounted) return;
 
         setBiometricAvailableState(bioAvail);
         setBiometricEnabledState(bioEnabled);
+        setPinEnabled(pinExists);
+        setCustomTokens(customToks);
 
         if (stored) {
           addressesRef.current = stored.addresses;
@@ -262,8 +309,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           setHasWallet(true);
           setMnemonic(stored.mnemonic);
           setAddresses(stored.addresses);
-          // Only lock if biometric is both available AND enabled
-          if (bioEnabled && bioAvail) {
+          // Lock if PIN exists OR biometrics is enabled
+          if (pinExists || (bioEnabled && bioAvail)) {
             setIsLocked(true);
           }
         }
@@ -301,14 +348,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   return (
     <WalletContext.Provider value={{
       isLoaded, hasWallet, isLocked, mnemonic, addresses,
-      selectedNetwork, balances, tokenBalances, totalUSD,
+      selectedNetwork, balances, tokenBalances, customTokens, totalUSD,
       isLoadingBalances, isLoadingTokens,
-      biometricEnabled, biometricAvailable,
+      biometricEnabled, biometricAvailable, pinEnabled,
       createWallet, importWallet, confirmWalletCreation, removeWallet, setupPIN,
-      setSelectedNetwork, refreshBalances, refreshTokenBalances,
+      setSelectedNetwork, refreshBalances, refreshTokenBalances, refreshCustomTokens,
       getCurrentAddress, sendTransaction,
       unlockWithBiometrics, unlockWithPIN, lockWallet,
       enableBiometric, disableBiometric,
+      importCustomToken, deleteCustomToken,
     }}>
       {children}
     </WalletContext.Provider>

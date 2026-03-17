@@ -20,7 +20,7 @@ export default function TabLayout() {
       android: insets.bottom + 8,
       default: 8,
     }),
-    paddingHorizontal: 16,
+    paddingHorizontal: 8,
     backgroundColor: Colors.surface,
     borderTopWidth: 1,
     borderTopColor: Colors.surfaceBorder,
@@ -34,7 +34,7 @@ export default function TabLayout() {
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.textMuted,
         tabBarLabelStyle: {
-          fontSize: 11,
+          fontSize: 10,
           fontWeight: '500',
         },
       }}
@@ -63,6 +63,15 @@ export default function TabLayout() {
           title: 'Receive',
           tabBarIcon: ({ color, size }) => (
             <MaterialIcons name="qr-code" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="discover"
+        options={{
+          title: 'Discover',
+          tabBarIcon: ({ color, size }) => (
+            <MaterialIcons name="explore" size={size} color={color} />
           ),
         }}
       />

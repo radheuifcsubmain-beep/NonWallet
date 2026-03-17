@@ -1,8 +1,9 @@
 // Powered by OnSpace.AI
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable,
   Alert, Platform, Modal, TouchableOpacity, Switch, TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -13,6 +14,8 @@ import { LockScreen } from '../../components/feature/LockScreen';
 import { SeedPhraseGrid } from '../../components/feature/SeedPhraseGrid';
 import { Colors, Spacing, Radii } from '../../constants/theme';
 import { NETWORKS, NetworkId } from '../../constants/config';
+import { fetchTokenMetadataFromPinata, savePinataCredentials, getPinataCredentials } from '../../services/pinataService';
+import { CustomToken } from '../../services/customTokenService';
 
 const NETWORK_ICONS: Record<NetworkId, string> = {
   ethereum: 'Ξ',
@@ -21,17 +24,169 @@ const NETWORK_ICONS: Record<NetworkId, string> = {
   solana: '◎',
 };
 
+const KEYPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'];
+
+// ── Inline PIN verify component for sensitive actions ─────────────────────────
+function PinVerify({
+  title,
+  subtitle,
+  onSuccess,
+  onCancel,
+}: {
+  title: string;
+  subtitle: string;
+  onSuccess: () => void;
+  onCancel: () => void;
+}) {
+  const { unlockWithPIN } = useWallet();
+  const [pin, setPin] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const verifyPin = useCallback(async (entered: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const valid = await unlockWithPIN(entered);
+      if (valid) {
+        onSuccess();
+      } else {
+        setError('Incorrect PIN. Try again.');
+        setPin('');
+      }
+    } catch {
+      setError('Verification failed.');
+      setPin('');
+    } finally {
+      setLoading(false);
+    }
+  }, [unlockWithPIN, onSuccess]);
+
+  const handleDigit = useCallback((digit: string) => {
+    if (loading) return;
+    setError('');
+    setPin(prev => {
+      if (prev.length >= 6) return prev;
+      const next = prev + digit;
+      if (next.length === 6) {
+        setTimeout(() => verifyPin(next), 50);
+      }
+      return next;
+    });
+  }, [loading, verifyPin]);
+
+  const handleDelete = useCallback(() => {
+    setError('');
+    setPin(p => p.slice(0, -1));
+  }, []);
+
+  return (
+    <View style={pinStyles.container}>
+      <View style={pinStyles.iconBg}>
+        <MaterialIcons name="lock" size={32} color={Colors.primary} />
+      </View>
+      <Text style={pinStyles.title}>{title}</Text>
+      <Text style={pinStyles.subtitle}>{subtitle}</Text>
+
+      {/* PIN dots */}
+      <View style={pinStyles.dotsRow}>
+        {Array.from({ length: 6 }).map((_, i) => (
+          <View key={i} style={[pinStyles.dot, i < pin.length && pinStyles.dotFilled]} />
+        ))}
+      </View>
+
+      {error ? (
+        <View style={pinStyles.errorRow}>
+          <MaterialIcons name="error-outline" size={13} color={Colors.error} />
+          <Text style={pinStyles.errorText}>{error}</Text>
+        </View>
+      ) : (
+        <Text style={pinStyles.hint}>Enter your 6-digit PIN</Text>
+      )}
+
+      {/* Keypad */}
+      <View style={pinStyles.keypad}>
+        {KEYPAD.map((key, idx) => {
+          if (key === '') return <View key={idx} style={pinStyles.keyEmpty} />;
+          if (key === 'del') {
+            return (
+              <Pressable
+                key={idx}
+                onPress={handleDelete}
+                style={({ pressed }) => [pinStyles.keyBtn, pressed && pinStyles.keyPressed]}
+                disabled={loading}
+                hitSlop={6}
+              >
+                <MaterialIcons name="backspace" size={20} color={Colors.textSecondary} />
+              </Pressable>
+            );
+          }
+          return (
+            <Pressable
+              key={idx}
+              onPress={() => handleDigit(key)}
+              style={({ pressed }) => [pinStyles.keyBtn, pressed && pinStyles.keyPressed]}
+              disabled={loading}
+            >
+              <Text style={pinStyles.keyText}>{key}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {loading && (
+        <ActivityIndicator size="small" color={Colors.primary} style={{ marginTop: 8 }} />
+      )}
+
+      <Pressable onPress={onCancel} style={pinStyles.cancelBtn}>
+        <Text style={pinStyles.cancelText}>Cancel</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const pinStyles = StyleSheet.create({
+  container: { alignItems: 'center', gap: 12, width: '100%', paddingVertical: 8 },
+  iconBg: {
+    width: 64, height: 64, borderRadius: 32,
+    backgroundColor: Colors.primaryDim, borderWidth: 1, borderColor: Colors.primary + '44',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  title: { fontSize: 18, fontWeight: '700', color: Colors.textPrimary },
+  subtitle: { fontSize: 13, color: Colors.textMuted, textAlign: 'center', lineHeight: 18 },
+  dotsRow: { flexDirection: 'row', gap: 12, marginVertical: 4 },
+  dot: { width: 13, height: 13, borderRadius: 7, borderWidth: 2, borderColor: Colors.surfaceBorder, backgroundColor: 'transparent' },
+  dotFilled: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  hint: { fontSize: 12, color: Colors.textMuted },
+  errorRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  errorText: { fontSize: 12, color: Colors.error },
+  keypad: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', width: '100%', maxWidth: 260, gap: 10 },
+  keyBtn: {
+    width: 70, height: 70, borderRadius: 35,
+    backgroundColor: Colors.surfaceElevated, borderWidth: 1, borderColor: Colors.surfaceBorder,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  keyEmpty: { width: 70, height: 70 },
+  keyPressed: { backgroundColor: Colors.primaryDim, borderColor: Colors.primary },
+  keyText: { fontSize: 22, fontWeight: '600', color: Colors.textPrimary },
+  cancelBtn: { paddingVertical: 10, paddingHorizontal: 20 },
+  cancelText: { fontSize: 14, color: Colors.textMuted, fontWeight: '500' },
+});
+
+// ── Main Settings Screen ──────────────────────────────────────────────────────
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const {
     mnemonic, addresses, removeWallet, selectedNetwork,
     biometricEnabled, biometricAvailable, enableBiometric, disableBiometric,
-    lockWallet, isLocked,
+    lockWallet, isLocked, customTokens, importCustomToken, deleteCustomToken,
+    refreshCustomTokens,
   } = useWallet();
 
   const [showSeedPhrase, setShowSeedPhrase] = useState(false);
-  const [showSeedConfirm, setShowSeedConfirm] = useState(false);
+  const [showPinForSeed, setShowPinForSeed] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAddresses, setShowAddresses] = useState(false);
   const [showPinSetup, setShowPinSetup] = useState(false);
@@ -39,6 +194,23 @@ export default function SettingsScreen() {
   const [confirmPin, setConfirmPin] = useState('');
   const [pinError, setPinError] = useState('');
   const [alertConfig, setAlertConfig] = useState({ visible: false, title: '', message: '', onOk: undefined as (() => void) | undefined });
+
+  // Pinata state
+  const [showPinataSetup, setShowPinataSetup] = useState(false);
+  const [showTokenImport, setShowTokenImport] = useState(false);
+  const [pinataKey, setPinataKey] = useState('');
+  const [pinataSecret, setPinataSecret] = useState('');
+  const [pinataConfigured, setPinataConfigured] = useState(false);
+  const [tokenCid, setTokenCid] = useState('');
+  const [tokenImporting, setTokenImporting] = useState(false);
+  const [tokenImportError, setTokenImportError] = useState('');
+  const [tokenImportSuccess, setTokenImportSuccess] = useState('');
+  const [showCustomTokens, setShowCustomTokens] = useState(false);
+
+  useEffect(() => {
+    getPinataCredentials().then(c => setPinataConfigured(!!c));
+    refreshCustomTokens();
+  }, []);
 
   const showAlert = useCallback((title: string, message: string, onOk?: () => void) => {
     if (Platform.OS === 'web') {
@@ -77,9 +249,35 @@ export default function SettingsScreen() {
     setPinError('');
   }, [newPin, confirmPin, enableBiometric]);
 
+  const handleSavePinata = useCallback(async () => {
+    if (!pinataKey.trim() || !pinataSecret.trim()) return;
+    await savePinataCredentials(pinataKey.trim(), pinataSecret.trim());
+    setPinataConfigured(true);
+    setShowPinataSetup(false);
+    setPinataKey('');
+    setPinataSecret('');
+  }, [pinataKey, pinataSecret]);
+
+  const handleImportToken = useCallback(async () => {
+    if (!tokenCid.trim()) return;
+    setTokenImporting(true);
+    setTokenImportError('');
+    setTokenImportSuccess('');
+    try {
+      const metadata = await fetchTokenMetadataFromPinata(tokenCid.trim());
+      await importCustomToken(metadata);
+      setTokenImportSuccess(`✓ ${metadata.name} (${metadata.symbol}) imported successfully!`);
+      setTokenCid('');
+    } catch (e: any) {
+      setTokenImportError(e?.message ?? 'Failed to import token. Check the CID or URL.');
+    } finally {
+      setTokenImporting(false);
+    }
+  }, [tokenCid, importCustomToken]);
+
   const currentNetwork = NETWORKS[selectedNetwork];
 
-  if (isLocked) return <LockScreen onUnlocked={() => {}} />; // Lock screen handles unlock via context
+  if (isLocked) return <LockScreen onUnlocked={() => {}} />;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -105,7 +303,7 @@ export default function SettingsScreen() {
               {NETWORK_ICONS[selectedNetwork]}
             </Text>
           </View>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.walletTitle}>My Wallet</Text>
             <Text style={styles.walletSubtitle}>Non-Custodial · Multi-Chain</Text>
           </View>
@@ -147,14 +345,13 @@ export default function SettingsScreen() {
               </View>
               <View style={styles.settingInfo}>
                 <Text style={styles.settingLabel}>Lock Wallet Now</Text>
-                <Text style={styles.settingSubtitle}>Require auth to re-open</Text>
+                <Text style={styles.settingSubtitle}>Require PIN to re-open</Text>
               </View>
               <MaterialIcons name="chevron-right" size={20} color={Colors.textMuted} />
             </Pressable>
 
             <View style={styles.rowDivider} />
 
-            {/* Non-custodial badge */}
             <View style={styles.settingRow}>
               <View style={[styles.settingIconBg, { backgroundColor: Colors.accent + '22' }]}>
                 <MaterialIcons name="security" size={18} color={Colors.accent} />
@@ -174,16 +371,17 @@ export default function SettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Wallet</Text>
           <GlassCard padding={0}>
+            {/* Backup seed — requires PIN */}
             <Pressable
               style={({ pressed }) => [styles.settingRow, pressed && styles.settingRowPressed]}
-              onPress={() => setShowSeedConfirm(true)}
+              onPress={() => setShowPinForSeed(true)}
             >
               <View style={[styles.settingIconBg, { backgroundColor: Colors.warning + '22' }]}>
                 <MaterialIcons name="security" size={18} color={Colors.warning} />
               </View>
               <View style={styles.settingInfo}>
                 <Text style={styles.settingLabel}>Backup Seed Phrase</Text>
-                <Text style={styles.settingSubtitle}>View your 12-word recovery phrase</Text>
+                <Text style={styles.settingSubtitle}>PIN required to view recovery phrase</Text>
               </View>
               <MaterialIcons name="chevron-right" size={20} color={Colors.textMuted} />
             </Pressable>
@@ -221,6 +419,152 @@ export default function SettingsScreen() {
                     </View>
                   </View>
                 ))}
+              </View>
+            )}
+          </GlassCard>
+        </View>
+
+        {/* ── Token Management ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Token Management</Text>
+          <GlassCard padding={0}>
+            {/* Pinata config */}
+            <Pressable
+              style={({ pressed }) => [styles.settingRow, pressed && styles.settingRowPressed]}
+              onPress={() => setShowPinataSetup(true)}
+            >
+              <View style={[styles.settingIconBg, { backgroundColor: '#E8431B22' }]}>
+                <MaterialIcons name="cloud" size={18} color="#E8431B" />
+              </View>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>Pinata IPFS Config</Text>
+                <Text style={styles.settingSubtitle}>
+                  {pinataConfigured ? '✓ API credentials saved' : 'Configure Pinata API keys'}
+                </Text>
+              </View>
+              <View style={[styles.configBadge, { backgroundColor: pinataConfigured ? Colors.accentDim : Colors.surfaceElevated }]}>
+                <Text style={[styles.configBadgeText, { color: pinataConfigured ? Colors.accent : Colors.textMuted }]}>
+                  {pinataConfigured ? 'Done' : 'Setup'}
+                </Text>
+              </View>
+            </Pressable>
+
+            <View style={styles.rowDivider} />
+
+            {/* Import token */}
+            <Pressable
+              style={({ pressed }) => [styles.settingRow, pressed && styles.settingRowPressed]}
+              onPress={() => setShowTokenImport(!showTokenImport)}
+            >
+              <View style={[styles.settingIconBg, { backgroundColor: Colors.primary + '22' }]}>
+                <MaterialIcons name="add-circle-outline" size={18} color={Colors.primary} />
+              </View>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>Import Token from Pinata</Text>
+                <Text style={styles.settingSubtitle}>Add a custom token via IPFS CID or URL</Text>
+              </View>
+              <MaterialIcons name={showTokenImport ? 'expand-less' : 'expand-more'} size={20} color={Colors.textMuted} />
+            </Pressable>
+
+            {showTokenImport && (
+              <View style={styles.importTokenSection}>
+                <Text style={styles.importHint}>
+                  Paste the Pinata CID or full gateway URL for the token metadata JSON.
+                </Text>
+                <View style={styles.cidInputRow}>
+                  <TextInput
+                    value={tokenCid}
+                    onChangeText={(t) => { setTokenCid(t); setTokenImportError(''); setTokenImportSuccess(''); }}
+                    placeholder="QmXxx... or https://gateway.pinata.cloud/ipfs/..."
+                    placeholderTextColor={Colors.textMuted}
+                    style={styles.cidInput}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    multiline
+                  />
+                </View>
+                {tokenImportError ? (
+                  <View style={styles.importFeedback}>
+                    <MaterialIcons name="error-outline" size={13} color={Colors.error} />
+                    <Text style={styles.importErrorText}>{tokenImportError}</Text>
+                  </View>
+                ) : null}
+                {tokenImportSuccess ? (
+                  <View style={styles.importFeedback}>
+                    <MaterialIcons name="check-circle" size={13} color={Colors.accent} />
+                    <Text style={styles.importSuccessText}>{tokenImportSuccess}</Text>
+                  </View>
+                ) : null}
+                <Pressable
+                  onPress={handleImportToken}
+                  disabled={tokenImporting || !tokenCid.trim()}
+                  style={({ pressed }) => [
+                    styles.importBtn,
+                    pressed && { opacity: 0.8 },
+                    (tokenImporting || !tokenCid.trim()) && styles.importBtnDisabled,
+                  ]}
+                >
+                  {tokenImporting ? (
+                    <ActivityIndicator size="small" color={Colors.textInverse} />
+                  ) : (
+                    <>
+                      <MaterialIcons name="file-download" size={16} color={Colors.textInverse} />
+                      <Text style={styles.importBtnText}>Import Token</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+            )}
+
+            <View style={styles.rowDivider} />
+
+            {/* Custom tokens list */}
+            <Pressable
+              style={({ pressed }) => [styles.settingRow, pressed && styles.settingRowPressed]}
+              onPress={() => setShowCustomTokens(!showCustomTokens)}
+            >
+              <View style={[styles.settingIconBg, { backgroundColor: Colors.secondary + '22' }]}>
+                <MaterialIcons name="token" size={18} color={Colors.secondary} />
+              </View>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>My Custom Tokens</Text>
+                <Text style={styles.settingSubtitle}>{customTokens.length} token{customTokens.length !== 1 ? 's' : ''} imported</Text>
+              </View>
+              <MaterialIcons name={showCustomTokens ? 'expand-less' : 'expand-more'} size={20} color={Colors.textMuted} />
+            </Pressable>
+
+            {showCustomTokens && (
+              <View style={styles.customTokensContainer}>
+                {customTokens.length === 0 ? (
+                  <Text style={styles.noTokensText}>No custom tokens imported yet</Text>
+                ) : (
+                  customTokens.map((token: CustomToken) => (
+                    <View key={token.id} style={styles.customTokenItem}>
+                      <View style={[styles.tokenIconBg, { backgroundColor: token.color + '33' }]}>
+                        <Text style={[styles.tokenIconText, { color: token.color }]}>
+                          {token.symbol[0]}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.tokenNameRow}>
+                          <Text style={styles.tokenName}>{token.symbol}</Text>
+                          {token.isOwnToken && (
+                            <View style={styles.ownBadge}>
+                              <Text style={styles.ownBadgeText}>My Token</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={styles.tokenNetwork}>{token.name} · {NETWORKS[token.network]?.name ?? token.network}</Text>
+                        <Text style={styles.tokenAddr} numberOfLines={1} ellipsizeMode="middle">
+                          {token.contractAddress}
+                        </Text>
+                      </View>
+                      <Pressable onPress={() => deleteCustomToken(token.id)} hitSlop={8}>
+                        <MaterialIcons name="delete-outline" size={18} color={Colors.error} />
+                      </Pressable>
+                    </View>
+                  ))
+                )}
               </View>
             )}
           </GlassCard>
@@ -277,21 +621,57 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.appInfo}>
-          <Text style={styles.appInfoText}>CryptoVault v1.0.0</Text>
-          <Text style={styles.appInfoText}>Non-Custodial · ethers.js · BIP39/44</Text>
+          <Text style={styles.appInfoText}>OnSpace Wallet v1.0.0</Text>
+          <Text style={styles.appInfoText}>Non-Custodial · ethers.js · BIP39/44 · Pinata IPFS</Text>
         </View>
       </ScrollView>
 
-      {/* ── PIN setup modal ── */}
+      {/* ── PIN verification before seed phrase ── */}
+      {showPinForSeed && (
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.backdrop} onPress={() => setShowPinForSeed(false)} />
+          <GlassCard style={styles.pinModalCard}>
+            <PinVerify
+              title="Verify Identity"
+              subtitle="Enter your PIN to view your seed phrase"
+              onSuccess={() => {
+                setShowPinForSeed(false);
+                setShowSeedPhrase(true);
+              }}
+              onCancel={() => setShowPinForSeed(false)}
+            />
+          </GlassCard>
+        </View>
+      )}
+
+      {/* ── Seed phrase display modal ── */}
+      {showSeedPhrase && mnemonic && (
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.backdrop} onPress={() => setShowSeedPhrase(false)} />
+          <GlassCard style={styles.seedCard}>
+            <View style={styles.seedHeader}>
+              <Text style={styles.seedTitle}>Your Seed Phrase</Text>
+              <Pressable onPress={() => setShowSeedPhrase(false)} hitSlop={8}>
+                <MaterialIcons name="close" size={22} color={Colors.textSecondary} />
+              </Pressable>
+            </View>
+            <View style={styles.warningBanner}>
+              <MaterialIcons name="warning" size={14} color={Colors.warning} />
+              <Text style={styles.warningText}>Never share this with anyone!</Text>
+            </View>
+            <SeedPhraseGrid mnemonic={mnemonic} />
+          </GlassCard>
+        </View>
+      )}
+
+      {/* ── PIN setup modal (biometric) ── */}
       {showPinSetup && (
         <View style={styles.modalOverlay}>
           <Pressable style={styles.backdrop} onPress={() => setShowPinSetup(false)} />
-          <GlassCard style={styles.pinCard}>
+          <GlassCard style={styles.confirmCard}>
             <MaterialIcons name="fingerprint" size={32} color={Colors.primary} />
             <Text style={styles.confirmTitle}>Set Wallet PIN</Text>
-            <Text style={styles.confirmText}>
-              Set a PIN as a fallback for biometric authentication.
-            </Text>
+            <Text style={styles.confirmText}>Set a PIN as a fallback for biometric authentication.</Text>
             <TextInput
               value={newPin}
               onChangeText={setNewPin}
@@ -325,42 +705,43 @@ export default function SettingsScreen() {
         </View>
       )}
 
-      {/* ── Seed confirm modal ── */}
-      {showSeedConfirm && (
+      {/* ── Pinata Setup Modal ── */}
+      {showPinataSetup && (
         <View style={styles.modalOverlay}>
-          <Pressable style={styles.backdrop} onPress={() => setShowSeedConfirm(false)} />
+          <Pressable style={styles.backdrop} onPress={() => setShowPinataSetup(false)} />
           <GlassCard style={styles.confirmCard}>
-            <MaterialIcons name="warning" size={32} color={Colors.warning} />
-            <Text style={styles.confirmTitle}>View Seed Phrase</Text>
-            <Text style={styles.confirmText}>Make sure no one can see your screen. Never share your seed phrase.</Text>
+            <MaterialIcons name="cloud" size={32} color="#E8431B" />
+            <Text style={styles.confirmTitle}>Pinata IPFS Setup</Text>
+            <Text style={styles.confirmText}>
+              Enter your Pinata API credentials to import token metadata from IPFS.
+            </Text>
+            <TextInput
+              value={pinataKey}
+              onChangeText={setPinataKey}
+              placeholder="Pinata API Key"
+              placeholderTextColor={Colors.textMuted}
+              style={styles.pinInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TextInput
+              value={pinataSecret}
+              onChangeText={setPinataSecret}
+              placeholder="Pinata Secret API Key"
+              placeholderTextColor={Colors.textMuted}
+              style={styles.pinInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry
+            />
             <View style={styles.confirmActions}>
-              <Pressable style={styles.confirmCancelBtn} onPress={() => setShowSeedConfirm(false)}>
+              <Pressable style={styles.confirmCancelBtn} onPress={() => setShowPinataSetup(false)}>
                 <Text style={styles.confirmCancelText}>Cancel</Text>
               </Pressable>
-              <Pressable style={styles.confirmOkBtn} onPress={() => { setShowSeedConfirm(false); setShowSeedPhrase(true); }}>
-                <Text style={styles.confirmOkText}>Show Phrase</Text>
+              <Pressable style={styles.confirmOkBtn} onPress={handleSavePinata}>
+                <Text style={styles.confirmOkText}>Save</Text>
               </Pressable>
             </View>
-          </GlassCard>
-        </View>
-      )}
-
-      {/* ── Seed phrase display modal ── */}
-      {showSeedPhrase && mnemonic && (
-        <View style={styles.modalOverlay}>
-          <Pressable style={styles.backdrop} onPress={() => setShowSeedPhrase(false)} />
-          <GlassCard style={styles.seedCard}>
-            <View style={styles.seedHeader}>
-              <Text style={styles.seedTitle}>Your Seed Phrase</Text>
-              <Pressable onPress={() => setShowSeedPhrase(false)} hitSlop={8}>
-                <MaterialIcons name="close" size={22} color={Colors.textSecondary} />
-              </Pressable>
-            </View>
-            <View style={styles.warningBanner}>
-              <MaterialIcons name="warning" size={14} color={Colors.warning} />
-              <Text style={styles.warningText}>Never share this with anyone!</Text>
-            </View>
-            <SeedPhraseGrid mnemonic={mnemonic} />
           </GlassCard>
         </View>
       )}
@@ -427,14 +808,9 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 22, fontWeight: '700', color: Colors.textPrimary },
   lockBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: Radii.full,
-    backgroundColor: Colors.surfaceElevated,
-    borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 40, height: 40, borderRadius: Radii.full,
+    backgroundColor: Colors.surfaceElevated, borderWidth: 1, borderColor: Colors.surfaceBorder,
+    alignItems: 'center', justifyContent: 'center',
   },
   scrollContent: { gap: Spacing.md, padding: Spacing.md },
   walletCard: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, borderColor: Colors.primary + '44' },
@@ -445,11 +821,8 @@ const styles = StyleSheet.create({
   section: { gap: 8 },
   sectionLabel: { fontSize: 12, fontWeight: '600', color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
   settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 14,
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
+    paddingHorizontal: Spacing.md, paddingVertical: 14,
   },
   settingRowPressed: { backgroundColor: Colors.surface },
   settingIconBg: { width: 36, height: 36, borderRadius: Radii.sm, alignItems: 'center', justifyContent: 'center' },
@@ -458,22 +831,11 @@ const styles = StyleSheet.create({
   settingSubtitle: { fontSize: 12, color: Colors.textMuted, marginTop: 2 },
   rowDivider: { height: 1, backgroundColor: Colors.surfaceBorder, marginLeft: 68 },
   networkIconText: { fontSize: 16, fontWeight: '700' },
-  verifiedBadge: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: Colors.accentDim,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  verifiedBadge: { width: 24, height: 24, borderRadius: 12, backgroundColor: Colors.accentDim, alignItems: 'center', justifyContent: 'center' },
   verifiedText: { fontSize: 12, color: Colors.accent, fontWeight: '700' },
   chainIdBadge: {
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: Radii.full,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    backgroundColor: Colors.surfaceElevated, borderRadius: Radii.full,
+    paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: Colors.surfaceBorder,
   },
   chainIdText: { fontSize: 10, color: Colors.textMuted, fontWeight: '600' },
   addressesContainer: { paddingHorizontal: Spacing.md, paddingBottom: Spacing.sm, gap: 8 },
@@ -481,12 +843,51 @@ const styles = StyleSheet.create({
   smallBadge: { width: 30, height: 30, borderRadius: Radii.full, alignItems: 'center', justifyContent: 'center' },
   addressNetworkName: { fontSize: 12, fontWeight: '500', color: Colors.textSecondary },
   addressValue: { fontSize: 11, color: Colors.textMuted, fontFamily: 'monospace' },
+
+  // Token import
+  configBadge: {
+    paddingHorizontal: 10, paddingVertical: 3, borderRadius: Radii.full,
+    borderWidth: 1, borderColor: Colors.surfaceBorder,
+  },
+  configBadgeText: { fontSize: 11, fontWeight: '600' },
+  importTokenSection: { paddingHorizontal: Spacing.md, paddingBottom: Spacing.md, gap: 10 },
+  importHint: { fontSize: 12, color: Colors.textMuted, lineHeight: 18 },
+  cidInputRow: {
+    backgroundColor: Colors.surfaceElevated, borderRadius: Radii.md,
+    borderWidth: 1, borderColor: Colors.surfaceBorder, padding: Spacing.sm,
+  },
+  cidInput: { color: Colors.textPrimary, fontSize: 13, minHeight: 60, fontFamily: 'monospace' },
+  importFeedback: { flexDirection: 'row', alignItems: 'flex-start', gap: 6 },
+  importErrorText: { flex: 1, fontSize: 12, color: Colors.error, lineHeight: 18 },
+  importSuccessText: { flex: 1, fontSize: 12, color: Colors.accent, lineHeight: 18 },
+  importBtn: {
+    height: 44, backgroundColor: Colors.primary, borderRadius: Radii.md,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+  },
+  importBtnDisabled: { opacity: 0.5 },
+  importBtnText: { fontSize: 14, fontWeight: '600', color: Colors.textInverse },
+
+  customTokensContainer: { paddingHorizontal: Spacing.md, paddingBottom: Spacing.sm, gap: 10 },
+  noTokensText: { fontSize: 13, color: Colors.textMuted, paddingVertical: 8, textAlign: 'center' },
+  customTokenItem: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, paddingVertical: 6 },
+  tokenIconBg: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  tokenIconText: { fontSize: 16, fontWeight: '700' },
+  tokenNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  tokenName: { fontSize: 14, fontWeight: '600', color: Colors.textPrimary },
+  ownBadge: {
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: Radii.full,
+    backgroundColor: Colors.primaryDim, borderWidth: 1, borderColor: Colors.primary + '44',
+  },
+  ownBadgeText: { fontSize: 9, fontWeight: '700', color: Colors.primary },
+  tokenNetwork: { fontSize: 11, color: Colors.textMuted, marginTop: 1 },
+  tokenAddr: { fontSize: 10, color: Colors.textMuted, fontFamily: 'monospace', marginTop: 1 },
+
   appInfo: { alignItems: 'center', gap: 4, paddingBottom: 8 },
   appInfoText: { fontSize: 11, color: Colors.textMuted },
   modalOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'flex-end', zIndex: 100, padding: Spacing.md },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.7)' },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.75)' },
+  pinModalCard: { gap: 0, borderRadius: Radii.xl, paddingVertical: Spacing.md },
   confirmCard: { gap: Spacing.md, alignItems: 'center', borderRadius: Radii.xl },
-  pinCard: { gap: Spacing.md, alignItems: 'center', borderRadius: Radii.xl, width: '100%' },
   confirmTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary, textAlign: 'center' },
   confirmText: { fontSize: 14, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
   confirmActions: { flexDirection: 'row', gap: Spacing.sm, width: '100%' },
@@ -499,17 +900,10 @@ const styles = StyleSheet.create({
   confirmOkBtn: { flex: 1, height: 46, backgroundColor: Colors.primary, borderRadius: Radii.md, alignItems: 'center', justifyContent: 'center' },
   confirmOkText: { fontSize: 15, fontWeight: '600', color: Colors.textInverse },
   pinInput: {
-    width: '100%',
-    height: 48,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: Radii.md,
-    borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
-    paddingHorizontal: Spacing.md,
-    color: Colors.textPrimary,
-    fontSize: 18,
-    letterSpacing: 8,
-    textAlign: 'center',
+    width: '100%', height: 48, backgroundColor: Colors.surfaceElevated,
+    borderRadius: Radii.md, borderWidth: 1, borderColor: Colors.surfaceBorder,
+    paddingHorizontal: Spacing.md, color: Colors.textPrimary,
+    fontSize: 18, letterSpacing: 8, textAlign: 'center',
   },
   pinError: { fontSize: 13, color: Colors.error, textAlign: 'center' },
   seedCard: { gap: Spacing.md, borderRadius: Radii.xl },

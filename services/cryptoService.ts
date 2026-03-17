@@ -9,6 +9,8 @@ import { wordlist as englishWordlist } from '@scure/bip39/wordlists/english.js';
 import * as nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import CryptoJS from 'react-native-crypto-js';
+import { hmac } from '@noble/hashes/hmac';
+import { sha512 } from '@noble/hashes/sha2';
 import { STORAGE_KEYS, NetworkId, DERIVATION_PATHS } from '../constants/config';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -114,25 +116,16 @@ export function validateMnemonic(mnemonic: string): boolean {
 }
 
 // ─── SLIP-0010 ed25519 HD derivation (for Solana) ────────────────────────────
-// Implemented using SubtleCrypto HMAC-SHA512, which is available on all
-// supported platforms: iOS/Android (Hermes ≥ RN 0.71) and web browsers.
+// Uses @noble/hashes HMAC-SHA512 — works in React Native (no SubtleCrypto needed).
 
-async function hmacSha512(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
-    'raw',
-    key,
-    { name: 'HMAC', hash: 'SHA-512' },
-    false,
-    ['sign'],
-  );
-  const sig = await globalThis.crypto.subtle.sign('HMAC', cryptoKey, data);
-  return new Uint8Array(sig);
+function hmacSha512(key: Uint8Array, data: Uint8Array): Uint8Array {
+  return hmac(sha512, key, data);
 }
 
-async function slip10DeriveEd25519(seed: Uint8Array, path: string): Promise<Uint8Array> {
+function slip10DeriveEd25519(seed: Uint8Array, path: string): Uint8Array {
   const seedLabel = new TextEncoder().encode('ed25519 seed');
 
-  let h = await hmacSha512(seedLabel, seed);
+  let h = hmacSha512(seedLabel, seed);
   let keyBytes = h.slice(0, 32);
   let chainCode = h.slice(32);
 
@@ -146,7 +139,7 @@ async function slip10DeriveEd25519(seed: Uint8Array, path: string): Promise<Uint
     data.set(keyBytes, 1);
     new DataView(data.buffer).setUint32(33, hardenedIndex, false);
 
-    h = await hmacSha512(chainCode, data);
+    h = hmacSha512(chainCode, data);
     keyBytes = h.slice(0, 32);
     chainCode = h.slice(32);
   }
@@ -164,9 +157,9 @@ function deriveEVMWallet(mnemonic: string): ethers.HDNodeWallet {
   );
 }
 
-async function deriveSolanaAddress(mnemonic: string): Promise<string> {
+function deriveSolanaAddress(mnemonic: string): string {
   const seed = scureBip39.mnemonicToSeedSync(mnemonic.trim());
-  const privKeyBytes = await slip10DeriveEd25519(seed, DERIVATION_PATHS.solana);
+  const privKeyBytes = slip10DeriveEd25519(seed, DERIVATION_PATHS.solana);
   const keyPair = nacl.sign.keyPair.fromSeed(privKeyBytes);
   return bs58.encode(keyPair.publicKey);
 }
@@ -174,7 +167,7 @@ async function deriveSolanaAddress(mnemonic: string): Promise<string> {
 export async function deriveAddresses(mnemonic: string): Promise<WalletAddresses> {
   const evmWallet = deriveEVMWallet(mnemonic);
   const evmAddress = evmWallet.address;
-  const solanaAddress = await deriveSolanaAddress(mnemonic);
+  const solanaAddress = deriveSolanaAddress(mnemonic);
   return {
     ethereum: evmAddress,
     bsc: evmAddress,
